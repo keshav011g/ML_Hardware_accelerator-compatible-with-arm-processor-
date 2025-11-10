@@ -2,22 +2,22 @@
 This a hardware implementation of custom Digital IC, the standard architecture for a powerful hardware accelerator that commonly connects to an ARM processor (or similar RISC based processors) on a larger SoC.
 ### Understanding DMA-Enabled ML Accelerator
 
-This an advanced and highly effective architecture for an ML accelerator, commonly found in high-performance computing and embedded AI systems. This design leverages **DMA (Direct Memory Access)** to avoid the CPU bottleneck, allowing your custom hardware to operate at maximum efficiency.
+This an advanced and highly effective architecture for an ML accelerator, commonly found in high-performance computing and embedded AI systems. This design leverages **DMA (Direct Memory Access)** to avoid the CPU bottleneck, allowing this custom chip to operate at maximum efficiency.
 
 #### The Big Picture: CPU + Accelerator + RAM
 
 Imagine your entire system as three main components:
 
 1.  **CPU (Central Processing Unit):**
-    * **Role:** The "Boss" or "Orchestrator." It runs the high-level software (your application), manages the operating system, and sends commands to the accelerator.
-    * **Interaction:** Communicates with your accelerator's **control registers** via a low-bandwidth **AXI-Lite bus**.
+    * **Role:** It runs the high-level software (your application), manages the operating system, and sends commands to the accelerator.
+    * **Interaction:** Communicates with your accelerator's **control registers** via a low-bandwidth **AXI-Lite bus**.(maybe a memory mapped register interface)
 
 2.  **External RAM (DDR/SRAM):**
     * **Role:** The "Storage" for all large data: your ML model weights, the input images/text, and the final results.
     * **Interaction:** Both the CPU and your accelerator can access this, but the accelerator does so directly via a high-bandwidth **AXI-Master bus** using DMA.
 
 3.  **Your Verilog Accelerator IC:**
-    * **Role:** The "Worker Bee." It performs the heavy mathematical lifting of ML inference in parallel, at high speed.
+    * **Role:** It performs the heavy mathematical calculations of ML inference in parallel, at high speed.
     * **Interaction:**
         * **Receives commands** from the CPU (via AXI-Lite).
         * **Directly reads/writes large data** from/to external RAM (via AXI-Master DMA).
@@ -68,11 +68,7 @@ This is the exact sequence of events for performing an ML inference:
 * **Programmable Accelerator:** By writing `op_code` and `op_params` to registers, your single `ml_processing_unit.v` can perform *different types of ML operations*. This means it's not hardwired for just one model. You can chain together multiple operations (e.g., CONV -> RELU -> POOL -> FC) by sending a sequence of commands to the accelerator.
 * **Minimum Clock Cycle Core:** The `ml_processing_unit.v` itself contains the highly parallel, pipelined hardware (like systolic arrays) that performs the actual mathematical operations in the fastest possible way.
 
-#### "I Don't Know the Maths Behind Each Model. How Do I Make This?"
-
-This is the biggest challenge, and your `ml_processing_unit.v` is the answer, but it's *not* a trivial one:
-
-* **The "Maths" Becomes Hardware Instructions:** Instead of needing to know every mathematical detail of a neural network, you abstract them into a set of **primitive operations** that your hardware can perform.
+* **Hardware Instructions:** A set of **primitive operations** that your hardware can perform.
     * **Common ML Primitives:**
         * Matrix Multiplication (Multiply-Accumulate, MAC) - for Convolutional and Fully Connected layers
         * Element-wise Addition/Subtraction/Multiplication
@@ -81,24 +77,8 @@ This is the biggest challenge, and your `ml_processing_unit.v` is the answer, bu
         * Normalization (Batch Norm)
     * Your `ml_processing_unit.v` would have dedicated, optimized hardware blocks for each of these primitives.
 
-* **Software Layer:** You would then write a software library (e.g., a C++ library on the CPU) that breaks down a full ML model (like a TensorFlow Lite model) into a sequence of these primitive operations. The CPU then sends these operations, one by one, to your accelerator.
+* **Software Layer:(after we are done with the verilog implementation)** We would then write a software library (e.g., a C++ library on the CPU) that breaks down a full ML model (like a TensorFlow Lite model) into a sequence of these primitive operations. The CPU then sends these operations, one by one, to your accelerator.
 
-    * **Example (Conceptual):**
-        ```c++
-        // On the CPU:
-        accelerator.write_reg(ADDR_OP_CODE_REG, OP_CONVOLUTION);
-        accelerator.write_reg(ADDR_OP_PARAMS_0, filter_size_5x5 | stride_2);
-        accelerator.write_reg(ADDR_OP_PARAMS_1, in_channels_3 | out_channels_64);
-        accelerator.write_reg(ADDR_WGT_BASE_ADDR, conv1_weights_ram_addr);
-        accelerator.write_reg(ADDR_INPUT_BASE_ADDR, image_data_ram_addr);
-        accelerator.write_reg(ADDR_OUTPUT_BASE_ADDR, conv1_output_ram_addr);
-        accelerator.write_reg(ADDR_CONTROL_REG, START_BIT);
-        accelerator.wait_for_interrupt();
-
-        accelerator.write_reg(ADDR_OP_CODE_REG, OP_RELU);
-        accelerator.write_reg(ADDR_INPUT_BASE_ADDR, conv1_output_ram_addr);
-        accelerator.write_reg(ADDR_OUTPUT_BASE_ADDR, relu1_output_ram_addr);
-        accelerator.write_reg(ADDR_CONTROL_REG, START_BIT);
         accelerator.wait_for_interrupt();
         // ... and so on for each layer of the model
         ```

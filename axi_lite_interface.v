@@ -1,7 +1,3 @@
-// axi_lite_interface.v
-// Handles CPU reads/writes to internal registers.
-// This is boilerplate AXI-Lite slave logic.
-
 module axi_lite_interface #(
     parameter C_S_AXI_LITE_DATA_WIDTH = 32,
     parameter C_S_AXI_LITE_ADDR_WIDTH = 6
@@ -9,7 +5,7 @@ module axi_lite_interface #(
     input  wire clk,
     input  wire rst_n,
 
-    // AXI-Lite Slave Ports (Connected to ml_accelerator_top)
+    // AXI-Lite Slave Ports (Connected with ml_accelerator_top)
     input  wire [C_S_AXI_LITE_ADDR_WIDTH-1:0]    s_axi_lite_awaddr,
     input  wire                                 s_axi_lite_awvalid,
     output wire                                 s_axi_lite_awready,

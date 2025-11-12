@@ -5,9 +5,8 @@ This a hardware implementation of custom Digital IC, the standard architecture f
 This an advanced and highly effective architecture for an ML accelerator, commonly found in high-performance computing and embedded AI systems. This design leverages **DMA (Direct Memory Access)** to avoid the CPU bottleneck, allowing this custom chip to operate at maximum efficiency.
 
 #### The Big Picture: CPU + Accelerator + RAM
-![This is the alt text for my image](/images/ml_accelerator_schematic.jpg)
 Imagine your entire system as three main components:
-
+![Schematic for accelerator](/images/ml_accelerator_schematic.jpg)
 1.  **CPU (Central Processing Unit):**
     * **Role:** It runs the high-level software (your application), manages the operating system, and sends commands to the accelerator.
     * **Interaction:** Communicates with your accelerator's **control registers** via a low-bandwidth **AXI-Lite bus**.(maybe a memory mapped register interface)

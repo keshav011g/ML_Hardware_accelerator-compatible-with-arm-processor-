@@ -1,85 +1,69 @@
-# ML_Hardware_accelerator-compatible-with-arm-processor-
-This a hardware implementation of custom Digital IC, the standard architecture for a powerful hardware accelerator that commonly connects to an ARM processor (or similar RISC based processors) on a larger SoC.
-### Understanding DMA-Enabled ML Accelerator
+# 🚀 High-Performance ML Hardware Accelerator (ARM Compatible)
 
-This an advanced and highly effective architecture for an ML accelerator, commonly found in high-performance computing and embedded AI systems. This design leverages **DMA (Direct Memory Access)** to avoid the CPU bottleneck, allowing this custom chip to operate at maximum efficiency.
+> **A dedicated hardware IP core designed to offload heavy Matrix-Multiply-Accumulate (MAC) operations from ARM processors for efficient Edge AI inference.**
 
-#### The Big Picture: CPU + Accelerator + RAM
-Imagine your entire system as three main components:
-![Schematic for accelerator](/images/ml_accelerator_schematic.jpg)
-1.  **CPU (Central Processing Unit):**
-    * **Role:** It runs the high-level software (your application), manages the operating system, and sends commands to the accelerator.
-    * **Interaction:** Communicates with your accelerator's **control registers** via a low-bandwidth **AXI-Lite bus**.(maybe a memory mapped register interface)
+## 📖 Overview
 
-2.  **External RAM (DDR/SRAM):**
-    * **Role:** The "Storage" for all large data: your ML model weights, the input images/text, and the final results.
-    * **Interaction:** Both the CPU and your accelerator can access this, but the accelerator does so directly via a high-bandwidth **AXI-Master bus** using DMA.
+This repository contains the complete **Register Transfer Level (RTL)** implementation of a custom Digital AI Accelerator. It is architected to bridge the gap between low-power embedded CPUs (like the ARM Cortex-M series) and the high compute demands of modern Deep Learning models.
 
-3.  **Your Verilog Accelerator IC:**
-    * **Role:** It performs the heavy mathematical calculations of ML inference in parallel, at high speed.
-    * **Interaction:**
-        * **Receives commands** from the CPU (via AXI-Lite).
-        * **Directly reads/writes large data** from/to external RAM (via AXI-Master DMA).
-        * **Processes data** internally using its specialized `ml_processing_unit`.
-        * **Notifies the CPU** when it's done (via an interrupt or status register).
+By offloading the computationally expensive matrix math to this dedicated hardware, systems can achieve **100x-1000x efficiency gains** compared to software-based execution.
 
-#### How It Works: The Workflow
+## ✨ Key Features
 
-This is the exact sequence of events for performing an ML inference:
+* **16x16 Systolic Array Core:** Massively parallel execution engine capable of performing **256 MAC operations per clock cycle**.
+* **Weight-Stationary Dataflow:** Optimized architecture that minimizes energy-expensive memory accesses by reusing weights within the Processing Elements (PEs).
+* **Hardware Tiling Engine:** Automatically breaks down large matrices (e.g., 100x100) to fit onto the 16x16 physical core without software intervention.
+* **Automatic Zero Padding:** Hardware logic handles "ragged edges" (matrix sizes not divisible by 16) transparently.
+* **DMA-Enabled:** Integrated Direct Memory Access (DMA) controller to fetch weights and inputs autonomously, preventing CPU starvation.
+* **ARM-Ready Interface:** Standard AXI-Lite register map for seamless integration with AMBA-based SoCs.
 
-1.  **CPU Sets Up RAM (Software):**
-    * Your CPU (running C++ code) first loads the ML model's **weights** from its own storage (e.g., flash memory, SSD) into a specific region of the **external RAM**. It knows the *start address* and *size* of these weights.
-    * Similarly, it loads the **input data** (image pixels, text embeddings) into another specific region of the **external RAM**. It notes its *start address* and *size*.
-    * It designates a third region in external RAM for the **output results**.
+## 🏗️ System Architecture
 
-2.  **CPU Configures Accelerator (AXI-Lite Writes):**
-    * The CPU writes to your accelerator's **control registers** (defined in `ml_accelerator_top.v`):
-        * `ADDR_WGT_BASE_ADDR`: Where the weights begin in RAM.
-        * `ADDR_WGT_SIZE`: How many bytes of weights.
-        * `ADDR_INPUT_BASE_ADDR`: Where the input begins in RAM.
-        * `ADDR_INPUT_SIZE`: How many bytes of input.
-        * `ADDR_OUTPUT_BASE_ADDR`: Where the results should be written in RAM.
-        * `ADDR_OP_CODE_REG`: This is crucial! It tells the accelerator *what kind of ML operation* to perform (e.g., a Convolutional Layer, a Fully Connected Layer, a ReLU activation, etc.).
-        * `ADDR_OP_PARAMS_REG_0`, `ADDR_OP_PARAMS_REG_1`: Parameters for that operation (e.g., filter size, stride, number of channels, input tensor dimensions).
+The system is designed as a modular co-processor.
 
-3.  **CPU Initiates Accelerator (AXI-Lite Write):**
-    * The CPU writes a `1` to `ADDR_CONTROL_REG` (specifically, setting the `cpu_start_accel` bit). This is the "Go!" command.
-    * The CPU is now **free** to do other tasks! It doesn't need to babysit the data transfer.
+### 1. The Host Ecosystem
+* **CPU (ARM Cortex):** Acts as the orchestrator. It parses the neural network layers, sets up the memory pointers, and issues the "Start" command.
+* **External RAM (DDR):** Holds the heavy model weights and input buffers (images/audio).
 
-4.  **Accelerator Takes Over (DMA & Internal Computation):**
-    * Your accelerator's main **FSM** (`current_state` in `ml_accelerator_top.v`) starts its sequence:
-        * **`FSM_DMA_READ_WEIGHTS`:** It activates the internal `dma_controller.v`. The DMA controller independently reads the weights from the `ADDR_WGT_BASE_ADDR` in external RAM and streams them directly into the `ml_processing_unit.v`.
-        * **`FSM_DMA_READ_INPUT`:** Once weights are transferred, the DMA controller reads the input data from `ADDR_INPUT_BASE_ADDR` in external RAM and streams it into the `ml_processing_unit.v`.
-        * **`FSM_COMPUTE`:** The `ml_processing_unit.v` takes the streamed data and, using the `op_code` and `op_params`, performs the specified ML operation (e.g., a massive matrix multiplication for a convolutional layer). This happens at your IC's maximum clock speed and parallelism ("minimum clock cycle").
-        * **`FSM_DMA_WRITE_OUTPUT`:** The `ml_processing_unit.v` streams its results to the DMA controller, which then writes them back to the `ADDR_OUTPUT_BASE_ADDR` in external RAM.
+### 2. The Accelerator IP
+* **Control Unit (AXI-Lite):** A memory-mapped slave interface. The CPU communicates with the chip by writing to specific memory addresses (e.g., `0x4000_0000`).
+* **DMA Controller (AXI-Master):** A bus master that bursts large blocks of data from external RAM into the chip's internal SRAM buffers.
+* **Internal SRAM Buffers:**
+  * **Weight Buffer (32KB):** Caches model parameters.
+  * **Input Buffer (16KB):** Caches incoming feature maps.
+  * **Accumulator Buffer (16KB):** Stores partial sums before final write-back.
+* **Systolic Core:** The 16x16 grid of Processing Elements that performs the actual INT8 math.
 
-5.  **Accelerator Signals Completion (Interrupt / Status Register):**
-    * Once the DMA write is complete, the FSM transitions to `FSM_DONE`.
-    * It sets the "Done" bit in `ADDR_STATUS_REG` and sends an **interrupt** signal to the CPU.
+## ⚙️ Technical Specifications
 
-6.  **CPU Retrieves Results:**
-    * The CPU receives the interrupt (or periodically polls `ADDR_STATUS_REG`).
-    * It then directly reads the results from the `ADDR_OUTPUT_BASE_ADDR` in external RAM, knowing that the accelerator has placed them there.
+| Feature | Specification |
+| :--- | :--- |
+| **Precision** | INT8 (8-bit Integer) Inputs / INT24 Accumulation |
+| **Core Size** | 16x16 Grid (256 Processing Elements) |
+| **Throughput** | 256 Operations / Cycle |
+| **Memory Interface** | AXI4-Master (128-bit Data Width) |
+| **Control Interface** | AXI4-Lite (32-bit Data Width) |
+| **On-Chip Memory** | ~64 KB (Configurable SRAM Macros) |
+| **Target Frequency** | 200 MHz+ (on 28nm ASIC) / 100 MHz (on Artix-7 FPGA) |
 
-#### Why This Is Fast and Flexible
+## 🛠️ Hardware Integration (Register Map)
 
-* **DMA for Speed:** The CPU is never involved in moving large blocks of data. The DMA controller does it directly and very efficiently. This is critical for high-bandwidth applications like image processing.
-* **Programmable Accelerator:** By writing `op_code` and `op_params` to registers, your single `ml_processing_unit.v` can perform *different types of ML operations*. This means it's not hardwired for just one model. You can chain together multiple operations (e.g., CONV -> RELU -> POOL -> FC) by sending a sequence of commands to the accelerator.
-* **Minimum Clock Cycle Core:** The `ml_processing_unit.v` itself contains the highly parallel, pipelined hardware (like systolic arrays) that performs the actual mathematical operations in the fastest possible way.
+To control the accelerator from C/C++ code, use the following register offsets from the base address:
 
-* **Hardware Instructions:** A set of **primitive operations** that your hardware can perform.
-    * **Common ML Primitives:**
-        * Matrix Multiplication (Multiply-Accumulate, MAC) - for Convolutional and Fully Connected layers
-        * Element-wise Addition/Subtraction/Multiplication
-        * Activation Functions (ReLU, Sigmoid, Tanh) - usually implemented as lookup tables or simple comparators.
-        * Pooling (Max Pool, Average Pool)
-        * Normalization (Batch Norm)
-    * Your `ml_processing_unit.v` would have dedicated, optimized hardware blocks for each of these primitives.
+| Offset | Register Name | Access | Description |
+| :--- | :--- | :--- | :--- |
+| `0x00` | **REG_CONTROL** | Write | Write `0x1` to START the engine. |
+| `0x04` | **REG_STATUS** | Read | `Bit 0`: Busy, `Bit 1`: Done. |
+| `0x08` | **REG_M_SIZE** | R/W | Number of rows in the Input Matrix. |
+| `0x0C` | **REG_K_SIZE** | R/W | Shared dimension (Input Cols / Weight Rows). |
+| `0x10` | **REG_N_SIZE** | R/W | Number of columns in the Weight Matrix. |
 
-* **Software Layer:(after we are done with the verilog implementation)** We would then write a software library (e.g., a C++ library on the CPU) that breaks down a full ML model (like a TensorFlow Lite model) into a sequence of these primitive operations. The CPU then sends these operations, one by one, to your accelerator.
-
-        accelerator.wait_for_interrupt();
-        // ... and so on for each layer of the model
-        ```
-
-This modular approach allows you to implement various ML models by simply changing the sequence of primitive operations and their parameters that the CPU sends to your versatile hardware accelerator.
+**Example Driver Code:**
+```c
+void run_inference(int rows, int cols, int depth) {
+    *REG_M_SIZE = rows;
+    *REG_N_SIZE = cols;
+    *REG_K_SIZE = depth;
+    *REG_CONTROL = 1; // Start
+    while(!(*REG_STATUS & 0x02)); // Wait for Done
+}

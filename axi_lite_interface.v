@@ -1,85 +1,95 @@
-module axi_lite_interface #(
-    parameter C_S_AXI_LITE_DATA_WIDTH = 32,
-    parameter C_S_AXI_LITE_ADDR_WIDTH = 6
-)(
-    input  wire clk,
-    input  wire rst_n,
+module axi_lite_interface #
+(
+    parameter integer C_S_AXI_DATA_WIDTH = 32,
+    parameter integer C_S_AXI_ADDR_WIDTH = 6
+)
+(
+    input wire  clk,
+    input wire  rst_n,
 
-    // AXI-Lite Slave Ports (Connected with ml_accelerator_top)
-    input  wire [C_S_AXI_LITE_ADDR_WIDTH-1:0]    s_axi_lite_awaddr,
-    input  wire                                 s_axi_lite_awvalid,
-    output wire                                 s_axi_lite_awready,
-    input  wire [C_S_AXI_LITE_DATA_WIDTH-1:0]    s_axi_lite_wdata,
-    input  wire                                 s_axi_lite_wvalid,
-    output wire                                 s_axi_lite_wready,
-    output wire [1:0]                           s_axi_lite_bresp,
-    output wire                                 s_axi_lite_bvalid,
-    input  wire                                 s_axi_lite_bready,
-    input  wire [C_S_AXI_LITE_ADDR_WIDTH-1:0]    s_axi_lite_araddr,
-    input  wire                                 s_axi_lite_arvalid,
-    output wire                                 s_axi_lite_arready,
-    output wire [C_S_AXI_LITE_DATA_WIDTH-1:0]    s_axi_lite_rdata,
-    output wire [1:0]                           s_axi_lite_rresp,
-    output wire                                 s_axi_lite_rvalid,
-    input  wire                                 s_axi_lite_rready,
+    // AXI Slave Ports
+    input wire [C_S_AXI_ADDR_WIDTH-1 : 0] awaddr,
+    input wire  awvalid,
+    output reg  awready,
+    input wire [C_S_AXI_DATA_WIDTH-1 : 0] wdata,
+    input wire  wvalid,
+    output reg  wready,
+    output reg [1 : 0] bresp,
+    output reg  bvalid,
+    input wire  bready,
+    input wire [C_S_AXI_ADDR_WIDTH-1 : 0] araddr,
+    input wire  arvalid,
+    output reg  arready,
+    output reg [C_S_AXI_DATA_WIDTH-1 : 0] rdata,
+    output reg [1 : 0] rresp,
+    output reg  rvalid,
+    input wire  rready,
 
-    // Outputs to update internal registers in ml_accelerator_top
-    output reg [C_S_AXI_LITE_DATA_WIDTH-1:0] control_reg_wdata,
-    output reg [C_S_AXI_LITE_DATA_WIDTH-1:0] wgt_base_addr_reg_wdata,
-    output reg [C_S_AXI_LITE_DATA_WIDTH-1:0] wgt_size_reg_wdata,
-    output reg [C_S_AXI_LITE_DATA_WIDTH-1:0] input_base_addr_reg_wdata,
-    output reg [C_S_AXI_LITE_DATA_WIDTH-1:0] input_size_reg_wdata,
-    output reg [C_S_AXI_LITE_DATA_WIDTH-1:0] output_base_addr_reg_wdata,
-    output reg [C_S_AXI_LITE_DATA_WIDTH-1:0] output_size_reg_wdata,
-    output reg [C_S_AXI_LITE_DATA_WIDTH-1:0] op_code_reg_wdata,
-    output reg [C_S_AXI_LITE_DATA_WIDTH-1:0] op_params_reg_0_wdata,
-    output reg [C_S_AXI_LITE_DATA_WIDTH-1:0] op_params_reg_1_wdata,
+    // Internal Registers (Outputs to Core)
+    output reg [31:0] reg_ctrl,
+    output reg [31:0] reg_m_size,
+    output reg [31:0] reg_k_size,
+    output reg [31:0] reg_n_size,
+    output reg [31:0] reg_wgt_base, // Base Addr for Weights
+    output reg [31:0] reg_inp_base, // Base Addr for Input
 
-    // Input from ml_accelerator_top for CPU to read
-    input  wire [C_S_AXI_LITE_DATA_WIDTH-1:0] status_reg_rdata
+    // Status Inputs (From Core)
+    input wire [31:0] reg_status
 );
-    // ... Full AXI-Lite FSM and register write/read logic here ...
-    // This part is boilerplate and would be extensive.
-    // It would connect the s_axi_lite_wdata to the _wdata outputs
-    // based on s_axi_lite_awaddr, and connect s_axi_lite_rdata
-    // from the status_reg_rdata input based on s_axi_lite_araddr.
 
-    // Dummy assignments for compilation
-    assign s_axi_lite_awready = 1'b1;
-    assign s_axi_lite_wready = 1'b1;
-    assign s_axi_lite_bresp = 2'b00; // OKAY
-    assign s_axi_lite_bvalid = s_axi_lite_wvalid;
-    assign s_axi_lite_arready = 1'b1;
-    assign s_axi_lite_rdata = status_reg_rdata; // Simplistic
-    assign s_axi_lite_rresp = 2'b00; // OKAY
-    assign s_axi_lite_rvalid = s_axi_lite_arvalid;
-
-    always @(posedge clk) begin
+    // Write Logic
+    always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            control_reg_wdata <= 32'b0;
-            wgt_base_addr_reg_wdata <= 32'b0;
-            wgt_size_reg_wdata <= 32'b0;
-            input_base_addr_reg_wdata <= 32'b0;
-            input_size_reg_wdata <= 32'b0;
-            output_base_addr_reg_wdata <= 32'b0;
-            output_size_reg_wdata <= 32'b0;
-            op_code_reg_wdata <= 32'b0;
-            op_params_reg_0_wdata <= 32'b0;
-            op_params_reg_1_wdata <= 32'b0;
-        end else if (s_axi_lite_awvalid && s_axi_lite_wvalid) begin
-            case (s_axi_lite_awaddr)
-                ADDR_CONTROL_REG:      control_reg_wdata     <= s_axi_lite_wdata;
-                ADDR_WGT_BASE_ADDR:    wgt_base_addr_reg_wdata <= s_axi_lite_wdata;
-                ADDR_WGT_SIZE:         wgt_size_reg_wdata    <= s_axi_lite_wdata;
-                ADDR_INPUT_BASE_ADDR:  input_base_addr_reg_wdata <= s_axi_lite_wdata;
-                ADDR_INPUT_SIZE:       input_size_reg_wdata  <= s_axi_lite_wdata;
-                ADDR_OUTPUT_BASE_ADDR: output_base_addr_reg_wdata <= s_axi_lite_wdata;
-                ADDR_OUTPUT_SIZE:      output_size_reg_wdata <= s_axi_lite_wdata;
-                ADDR_OP_CODE_REG:      op_code_reg_wdata     <= s_axi_lite_wdata;
-                ADDR_OP_PARAMS_REG_0:  op_params_reg_0_wdata <= s_axi_lite_wdata;
-                ADDR_OP_PARAMS_REG_1:  op_params_reg_1_wdata <= s_axi_lite_wdata;
-                default: ; // Do nothing for invalid address
-            endcase
+            awready <= 0; wready <= 0; bvalid <= 0;
+            reg_ctrl <= 0; 
+            reg_m_size <= 16; reg_k_size <= 16; reg_n_size <= 16;
+            reg_wgt_base <= 0; reg_inp_base <= 0;
+        end else begin
+            if (~awready && awvalid && wvalid) begin
+                awready <= 1; wready <= 1;
+                // Write Address Decode
+                case (awaddr[5:2])
+                    4'h0: reg_ctrl     <= wdata;
+                    4'h2: reg_m_size   <= wdata;
+                    4'h3: reg_k_size   <= wdata;
+                    4'h4: reg_n_size   <= wdata;
+                    4'h5: reg_wgt_base <= wdata;
+                    4'h6: reg_inp_base <= wdata;
+                endcase
+            end else begin
+                awready <= 0; wready <= 0;
+                // Auto-clear start bit
+                if (reg_ctrl[0]) reg_ctrl[0] <= 0;
+            end
+
+            if (awready && wready) begin
+                bvalid <= 1;
+            end else if (bready && bvalid) begin
+                bvalid <= 0;
+            end
+        end
+    end
+
+    // Read Logic
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            arready <= 0; rvalid <= 0; rdata <= 0;
+        end else begin
+            if (~arready && arvalid) begin
+                arready <= 1;
+                rvalid <= 1;
+                case (araddr[5:2])
+                    4'h0: rdata <= reg_ctrl;
+                    4'h1: rdata <= reg_status;
+                    4'h2: rdata <= reg_m_size;
+                    4'h3: rdata <= reg_k_size;
+                    4'h4: rdata <= reg_n_size;
+                    default: rdata <= 0;
+                endcase
+            end else begin
+                arready <= 0;
+                if (rvalid && rready) rvalid <= 0;
+            end
         end
     end
 endmodule

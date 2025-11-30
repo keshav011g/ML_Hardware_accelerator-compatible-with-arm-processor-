@@ -1,264 +1,280 @@
 /*
  * Module: ml_accelerator_top
  * Description:
- * - Top Level IP Core wrapping the Systolic Array.
- * - Implements AXI4-Lite Slave Interface for ARM Compatibility.
- * - Maps ARM memory writes to internal configuration registers.
+ * - Top Level IP Core.
+ * - Instantiates AXI_Lite_Interface (CPU Control).
+ * - Instantiates DMA_Controller (Data Fetching).
+ * - Instantiates Systolic_Array (Compute Engine).
+ * - Coordinates data flow via FSM.
  */
 
-module ml_accelerator_top 
+module ml_accelerator_top #
 (
     parameter integer C_S_AXI_DATA_WIDTH = 32,
-    parameter integer C_S_AXI_ADDR_WIDTH = 6 // 64 bytes address space
+    parameter integer C_S_AXI_ADDR_WIDTH = 6,
+    parameter integer C_M_AXI_ADDR_WIDTH = 32,
+    parameter integer C_M_AXI_DATA_WIDTH = 32
 )
 (
     // --- Global Signals ---
-    input wire  s_axi_aclk,
-    input wire  s_axi_aresetn, // Active Low Reset
+    input wire  clk,
+    input wire  rst_n,
 
-    // --- AXI4-Lite Slave Interface (Connects to ARM Interconnect) ---
-    
-    // Write Address Channel
+    // --- AXI4-Lite Slave (CPU Interface) ---
     input wire [C_S_AXI_ADDR_WIDTH-1 : 0] s_axi_awaddr,
     input wire  s_axi_awvalid,
     output wire s_axi_awready,
-
-    // Write Data Channel
     input wire [C_S_AXI_DATA_WIDTH-1 : 0] s_axi_wdata,
     input wire [(C_S_AXI_DATA_WIDTH/8)-1 : 0] s_axi_wstrb,
     input wire  s_axi_wvalid,
     output wire s_axi_wready,
-
-    // Write Response Channel
     output wire [1 : 0] s_axi_bresp,
     output wire s_axi_bvalid,
     input wire  s_axi_bready,
-
-    // Read Address Channel
     input wire [C_S_AXI_ADDR_WIDTH-1 : 0] s_axi_araddr,
     input wire  s_axi_arvalid,
     output wire s_axi_arready,
-
-    // Read Data Channel
     output wire [C_S_AXI_DATA_WIDTH-1 : 0] s_axi_rdata,
     output wire [1 : 0] s_axi_rresp,
     output wire s_axi_rvalid,
     input wire  s_axi_rready,
 
+    // --- AXI4-Master (DMA Interface) ---
+    output wire [C_M_AXI_ADDR_WIDTH-1:0] m_axi_araddr,
+    output wire [7:0] m_axi_arlen,
+    output wire [2:0] m_axi_arsize,
+    output wire [1:0] m_axi_arburst,
+    output wire m_axi_arvalid,
+    input  wire m_axi_arready,
+    input  wire [C_M_AXI_DATA_WIDTH-1:0] m_axi_rdata,
+    input  wire m_axi_rlast,
+    input  wire m_axi_rvalid,
+    output wire m_axi_rready,
+
     // --- Interrupt ---
     output reg  irq_done
 );
 
-    // --- Register Map Addresses (Byte Offsets) ---
-    localparam ADDR_CTRL   = 6'h00; // Control (Bit 0 = Start)
-    localparam ADDR_STATUS = 6'h04; // Status  (Bit 0 = Busy, Bit 1 = Done)
-    localparam ADDR_M_SIZE = 6'h08; // Rows
-    localparam ADDR_K_SIZE = 6'h0C; // Shared Dim
-    localparam ADDR_N_SIZE = 6'h10; // Cols
+    // =========================================================================
+    // 1. INTERCONNECT WIRES
+    // =========================================================================
+    
+    // Config Registers (Driven by AXI Lite Interface)
+    wire [31:0] reg_ctrl;
+    wire [31:0] reg_m_size;
+    wire [31:0] reg_k_size;
+    wire [31:0] reg_n_size;
+    wire [31:0] reg_wgt_base;
+    wire [31:0] reg_inp_base;
+    
+    // Status Register (Driven by Logic, Read by AXI Lite)
+    reg  [31:0] reg_status;
 
-    // --- Internal Registers ---
-    reg [31:0] reg_ctrl;
-    reg [31:0] reg_status; // Read-only from logic
-    reg [31:0] reg_m_size;
-    reg [31:0] reg_k_size;
-    reg [31:0] reg_n_size;
+    // DMA Signals
+    reg         dma_start;
+    reg  [31:0] dma_addr;
+    reg  [31:0] dma_len;
+    wire        dma_done;
+    wire [31:0] dma_stream_data;
+    wire        dma_stream_valid;
 
-    // --- AXI State Machine Signals ---
-    reg axi_awready;
-    reg axi_wready;
-    reg [1:0] axi_bresp;
-    reg axi_bvalid;
-    reg axi_arready;
-    reg [31:0] axi_rdata;
-    reg [1:0] axi_rresp;
-    reg axi_rvalid;
-
-    // --- Core Logic Signals ---
-    wire sys_start;
+    // Core Control Signals
+    wire sys_start = reg_ctrl[0];
     reg  sys_busy;
     reg  sys_done;
+
+    // =========================================================================
+    // 2. INSTANTIATE SUB-MODULES
+    // =========================================================================
+
+    // --- CPU Interface ---
+    axi_lite_interface #(
+        .C_S_AXI_DATA_WIDTH(C_S_AXI_DATA_WIDTH),
+        .C_S_AXI_ADDR_WIDTH(C_S_AXI_ADDR_WIDTH)
+    ) u_cpu_if (
+        .clk(clk),
+        .rst_n(rst_n),
+        // AXI Ports
+        .awaddr(s_axi_awaddr), .awvalid(s_axi_awvalid), .awready(s_axi_awready),
+        .wdata(s_axi_wdata),   .wvalid(s_axi_wvalid),   .wready(s_axi_wready),
+        .bresp(s_axi_bresp),   .bvalid(s_axi_bvalid),   .bready(s_axi_bready),
+        .araddr(s_axi_araddr), .arvalid(s_axi_arvalid), .arready(s_axi_arready),
+        .rdata(s_axi_rdata),   .rresp(s_axi_rresp),     .rvalid(s_axi_rvalid), .rready(s_axi_rready),
+        // Internal Interface
+        .reg_ctrl(reg_ctrl),
+        .reg_m_size(reg_m_size),
+        .reg_k_size(reg_k_size),
+        .reg_n_size(reg_n_size),
+        .reg_wgt_base(reg_wgt_base),
+        .reg_inp_base(reg_inp_base),
+        .reg_status(reg_status)
+    );
+
+    // --- DMA Controller ---
+    dma_controller #(
+        .C_M_AXI_ADDR_WIDTH(C_M_AXI_ADDR_WIDTH),
+        .C_M_AXI_DATA_WIDTH(C_M_AXI_DATA_WIDTH)
+    ) u_dma (
+        .clk(clk),
+        .rst_n(rst_n),
+        // Control
+        .start(dma_start),
+        .base_addr(dma_addr),
+        .transfer_length(dma_len),
+        .done(dma_done),
+        // Stream Out
+        .stream_data(dma_stream_data),
+        .stream_valid(dma_stream_valid),
+        // AXI Master Ports
+        .m_axi_araddr(m_axi_araddr), .m_axi_arlen(m_axi_arlen),
+        .m_axi_arsize(m_axi_arsize), .m_axi_arburst(m_axi_arburst),
+        .m_axi_arvalid(m_axi_arvalid), .m_axi_arready(m_axi_arready),
+        .m_axi_rdata(m_axi_rdata), .m_axi_rlast(m_axi_rlast),
+        .m_axi_rvalid(m_axi_rvalid), .m_axi_rready(m_axi_rready)
+    );
+
+    // =========================================================================
+    // 3. ON-CHIP BUFFERS (Simplified)
+    // =========================================================================
+    // We need to capture the data streaming from DMA before feeding the array
     
-    // Assign AXI Outputs
-    assign s_axi_awready = axi_awready;
-    assign s_axi_wready  = axi_wready;
-    assign s_axi_bresp   = axi_bresp;
-    assign s_axi_bvalid  = axi_bvalid;
-    assign s_axi_arready = axi_arready;
-    assign s_axi_rdata   = axi_rdata;
-    assign s_axi_rresp   = axi_rresp;
-    assign s_axi_rvalid  = axi_rvalid;
+    reg [7:0] weight_buffer [0:255]; // Small buffer for 16x16 weights
+    reg [7:0] input_buffer  [0:255]; // Small buffer for inputs
+    reg [7:0] wgt_idx;
+    reg [7:0] inp_idx;
 
-    // AXI Write Logic
-    always @(posedge s_axi_aclk) begin
-        if (s_axi_aresetn == 1'b0) begin
-            axi_awready <= 1'b0;
-            axi_wready  <= 1'b0;
-            axi_bvalid  <= 1'b0;
-            axi_bresp   <= 2'b0;
-            reg_ctrl    <= 32'd0;
-            reg_m_size  <= 32'd16; // Default
-            reg_k_size  <= 32'd16;
-            reg_n_size  <= 32'd16;
-        end else begin
-            // Handshake for Write Address
-            if (~axi_awready && s_axi_awvalid && s_axi_wvalid) begin
-                axi_awready <= 1'b1;
-                axi_wready  <= 1'b1;
-            end else begin
-                axi_awready <= 1'b0;
-                axi_wready  <= 1'b0;
-            end
-
-            // Write Data to Registers
-            if (axi_awready && s_axi_awvalid && axi_wready && s_axi_wvalid) begin
-                case (s_axi_awaddr[5:2]) // Decode Address (Ignore lower 2 bits for 4-byte align)
-                    4'h0: reg_ctrl   <= s_axi_wdata;
-                    // 4'h1 is Status (Read Only)
-                    4'h2: reg_m_size <= s_axi_wdata;
-                    4'h3: reg_k_size <= s_axi_wdata;
-                    4'h4: reg_n_size <= s_axi_wdata;
-                    default: ; 
-                endcase
-                axi_bvalid <= 1'b1;
-                axi_bresp  <= 2'b0; // OKAY
-            end else begin
-                if (s_axi_bready && axi_bvalid) begin
-                    axi_bvalid <= 1'b0;
-                    // Self-clearing start bit
-                    reg_ctrl[0] <= 1'b0; 
-                end
-            end
+    // Logic to fill buffers from DMA Stream
+    always @(posedge clk) begin
+        if (dma_stream_valid) begin
+            // Depending on current state, fill WGT or INP buffer
+            if (state == S_FETCH_WEIGHTS) 
+                weight_buffer[wgt_idx] <= dma_stream_data[7:0]; // Taking lower 8 bits for demo
+            else if (state == S_FETCH_INPUTS)
+                input_buffer[inp_idx] <= dma_stream_data[7:0];
         end
     end
 
-    // AXI Read Logic
-    always @(posedge s_axi_aclk) begin
-        if (s_axi_aresetn == 1'b0) begin
-            axi_arready <= 1'b0;
-            axi_rvalid  <= 1'b0;
-            axi_rresp   <= 2'b0;
-            axi_rdata   <= 32'd0;
-        end else begin
-            if (~axi_arready && s_axi_arvalid) begin
-                axi_arready <= 1'b1;
-                axi_rvalid  <= 1'b1;
-                
-                // Read Mux
-                case (s_axi_araddr[5:2])
-                    4'h0: axi_rdata <= reg_ctrl;
-                    4'h1: axi_rdata <= {30'd0, sys_done, sys_busy}; // Status Register
-                    4'h2: axi_rdata <= reg_m_size;
-                    4'h3: axi_rdata <= reg_k_size;
-                    4'h4: axi_rdata <= reg_n_size;
-                    default: axi_rdata <= 32'd0;
-                endcase
-            end else begin
-                axi_arready <= 1'b0;
-                if (axi_rvalid && s_axi_rready) begin
-                    axi_rvalid <= 1'b0;
-                end
-            end
-        end
-    end
-
-    // --- ACCELERATOR CORE LOGIC ---
+    // =========================================================================
+    // 4. MAIN CONTROL FSM (The Orchestrator)
+    // =========================================================================
     
-    assign sys_start = reg_ctrl[0]; // Start signal triggers FSM
+    localparam S_IDLE          = 0;
+    localparam S_FETCH_WEIGHTS = 1;
+    localparam S_FETCH_INPUTS  = 2;
+    localparam S_LOAD_ARRAY    = 3;
+    localparam S_COMPUTE       = 4;
+    localparam S_DONE          = 5;
 
-    // FSM State Definitions
-    localparam S_IDLE        = 0;
-    localparam S_LOAD_WEIGHT = 1;
-    localparam S_COMPUTE     = 2;
-    localparam S_DONE        = 3;
-    
     reg [2:0] state;
-    reg [4:0] load_counter;   
-    reg [15:0] compute_counter;
+    reg array_load_weight;
     reg array_en;
-    reg load_weight;
+    reg [4:0] load_counter;
     
-    // Tiling Logic Wires
-    wire [127:0] flat_ifmap_in;
-    reg  [7:0]   padded_rows [0:15];
-    reg  [15:0]  tile_row;
+    // Array Wires
+    wire [127:0] flat_ifmap;
+    wire [127:0] flat_weight;
 
-    // Main Compute FSM
-    always @(posedge s_axi_aclk) begin
-        if (s_axi_aresetn == 1'b0) begin
+    // FSM
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
             state <= S_IDLE;
             sys_busy <= 0;
-            sys_done <= 0;
             irq_done <= 0;
-            tile_row <= 0;
+            dma_start <= 0;
+            wgt_idx <= 0; inp_idx <= 0;
         end else begin
+            // Update Status Register
+            reg_status <= {30'd0, sys_done, sys_busy};
+
             case (state)
                 S_IDLE: begin
-                    irq_done <= 0;
                     sys_done <= 0;
+                    irq_done <= 0;
                     if (sys_start) begin
-                        state <= S_LOAD_WEIGHT;
+                        state <= S_FETCH_WEIGHTS;
                         sys_busy <= 1;
-                        tile_row <= 0;
+                        // Setup DMA for Weights
+                        dma_addr <= reg_wgt_base;
+                        dma_len <= 256; // Fetch 256 weights
+                        dma_start <= 1;
+                        wgt_idx <= 0;
+                    end
+                end
+
+                S_FETCH_WEIGHTS: begin
+                    dma_start <= 0;
+                    if (dma_stream_valid) wgt_idx <= wgt_idx + 1;
+                    
+                    if (dma_done) begin
+                        state <= S_FETCH_INPUTS;
+                        // Setup DMA for Inputs
+                        dma_addr <= reg_inp_base;
+                        dma_len <= 256;
+                        dma_start <= 1;
+                        inp_idx <= 0;
+                    end
+                end
+
+                S_FETCH_INPUTS: begin
+                    dma_start <= 0;
+                    if (dma_stream_valid) inp_idx <= inp_idx + 1;
+
+                    if (dma_done) begin
+                        state <= S_LOAD_ARRAY;
                         load_counter <= 0;
                     end
                 end
 
-                S_LOAD_WEIGHT: begin
-                    load_weight <= 1;
+                S_LOAD_ARRAY: begin
+                    // Push Weights into Array (Daisy Chain)
+                    array_load_weight <= 1;
                     array_en <= 1;
-                    
                     if (load_counter == 15) begin
                         state <= S_COMPUTE;
                         load_counter <= 0;
-                        compute_counter <= 0;
                     end else begin
                         load_counter <= load_counter + 1;
                     end
                 end
 
                 S_COMPUTE: begin
-                    load_weight <= 0;
-                    if (compute_counter == (reg_k_size-1)) begin
-                        state <= S_DONE;
-                    end else begin
-                        compute_counter <= compute_counter + 1;
-                    end
+                    array_load_weight <= 0;
+                    // In a real system, we'd wait for compute cycles
+                    state <= S_DONE; 
                 end
-                
+
                 S_DONE: begin
                     sys_busy <= 0;
                     sys_done <= 1;
-                    irq_done <= 1; // Pulse Interrupt
+                    irq_done <= 1;
                     state <= S_IDLE;
                 end
             endcase
         end
     end
 
-    // --- ZERO PADDING LOGIC ---
-    genvar i;
-    generate
-        for (i=0; i<16; i=i+1) begin : PAD_LOGIC
-            wire [31:0] global_row_idx = (tile_row * 16) + i;
-            always @(*) begin
-                if (global_row_idx >= reg_m_size) 
-                    padded_rows[i] = 8'd0; 
-                else 
-                    padded_rows[i] = 8'd1; // Simplified data fetch
-            end
-            assign flat_ifmap_in[i*8 +: 8] = padded_rows[i];
-        end
-    endgenerate
+    // =========================================================================
+    // 5. CORE INSTANTIATION
+    // =========================================================================
+    
+    // Helper to flatten 16 rows from buffer for Array Inputs
+    // (Simplified packing for demo)
+    assign flat_ifmap = {input_buffer[15], input_buffer[14], input_buffer[13], input_buffer[12],
+                         input_buffer[11], input_buffer[10], input_buffer[9],  input_buffer[8],
+                         input_buffer[7],  input_buffer[6],  input_buffer[5],  input_buffer[4],
+                         input_buffer[3],  input_buffer[2],  input_buffer[1],  input_buffer[0], 
+                         {8'd0}}; // Pad if necessary (simplified)
 
-    // --- CORE INSTANTIATION ---
-    systolic_array_16x16 u_array (
-        .clk(s_axi_aclk),
-        .rst_n(s_axi_aresetn),
+    assign flat_weight = {weight_buffer[load_counter*16 + 15], weight_buffer[load_counter*16 + 0], {112'd0}}; // Just demo mapping
+
+    systolic_array_16x16 u_core (
+        .clk(clk),
+        .rst_n(rst_n),
         .en(array_en),
-        .load_weight(load_weight),
-        .flat_ifmap_in(flat_ifmap_in),
-        .flat_weight_in({16{8'd5}}), // Simulated weights
-        .flat_psum_in({16{24'd0}}),
+        .load_weight(array_load_weight),
+        .flat_ifmap_in({128{1'b1}}), // Connected to buffer logic in real implement
+        .flat_weight_in({128{1'b1}}),
+        .flat_psum_in({384{1'b0}}),
         .flat_psum_out()
     );
 

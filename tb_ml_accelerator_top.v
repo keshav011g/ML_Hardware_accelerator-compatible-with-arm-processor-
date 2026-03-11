@@ -2,166 +2,196 @@
 
 /*
  * Module: tb_ml_accelerator_top
- * Description:
- * Verifies the accelerator by running a simulated "0-9 Digit Classification".
- * * Scenario:
- * - We want to classify an Input Vector of size 64 (8x8 image).
- * - We have 10 Classes (0-9).
- * - Matrix Operation: [1x64] * [64x10] = [1x10] Output Scores.
- * * Setup:
- * - We act as the CPU to configure registers.
- * - We act as the RAM to provide data when the Accelerator requests it.
+ * Description: Complete Testbench simulating CPU AXI-Lite commands, 
+ * external RAM responses, and testing the Batch Processing feature.
  */
 
-module tb_ml_accelerator_top;
+module tb_ml_accelerator_top();
 
-    // --- Signals ---
+    // System Signals
     reg clk;
     reg rst_n;
+    
+    // AXI-Lite Simulation Signals (CPU to Accelerator)
+    reg  [5:0]  s_axi_awaddr;
+    reg         s_axi_awvalid;
+    wire        s_axi_awready;
+    reg  [31:0] s_axi_wdata;
+    reg  [3:0]  s_axi_wstrb;
+    reg         s_axi_wvalid;
+    wire        s_axi_wready;
+    wire [1:0]  s_axi_bresp;
+    wire        s_axi_bvalid;
+    reg         s_axi_bready;
+    
+    reg  [5:0]  s_axi_araddr;
+    reg         s_axi_arvalid;
+    wire        s_axi_arready;
+    wire [31:0] s_axi_rdata;
+    wire [1:0]  s_axi_rresp;
+    wire        s_axi_rvalid;
+    reg         s_axi_rready;
 
-    // CPU Interface
-    reg         reg_write_en;
-    reg  [3:0]  reg_addr;
-    reg  [31:0] reg_wdata;
-    wire [31:0] reg_rdata;
+    // AXI-Master Simulation Signals (Accelerator DMA to RAM)
+    wire [31:0] m_axi_araddr;
+    wire [7:0]  m_axi_arlen;
+    wire [2:0]  m_axi_arsize;
+    wire [1:0]  m_axi_arburst;
+    wire        m_axi_arvalid;
+    reg         m_axi_arready;
+    reg  [31:0] m_axi_rdata;
+    reg         m_axi_rlast;
+    reg         m_axi_rvalid;
+    wire        m_axi_rready;
+
     wire        irq_done;
 
-    // Memory Interface (The Accelerator acts as Master here)
-    wire [31:0] mem_read_addr;
-    reg  [31:0] mem_read_data;
+    // Memory Array to simulate actual SoC RAM (1024 bytes)
+    reg [7:0] MAIN_RAM [0:1023]; 
 
-    // --- Simulation Memory (Fake RAM) ---
-    // A small memory to hold our "Image" and "Weights"
-    // Address 0-100: Input Image (Flattened)
-    // Address 1000+: Weights
-    reg [7:0] fake_ram [0:4095]; 
-
-    // --- Instantiation ---
+    // Instantiate the Top Level Accelerator
     ml_accelerator_top uut (
         .clk(clk),
         .rst_n(rst_n),
-        .reg_write_en(reg_write_en),
-        .reg_addr(reg_addr),
-        .reg_wdata(reg_wdata),
-        .reg_rdata(reg_rdata),
-        .irq_done(irq_done),
-        .mem_read_addr(mem_read_addr),
-        .mem_read_data(mem_read_data_wire) // See logic below
+        .s_axi_awaddr(s_axi_awaddr),
+        .s_axi_awvalid(s_axi_awvalid),
+        .s_axi_awready(s_axi_awready),
+        .s_axi_wdata(s_axi_wdata),
+        .s_axi_wstrb(s_axi_wstrb),
+        .s_axi_wvalid(s_axi_wvalid),
+        .s_axi_wready(s_axi_wready),
+        .s_axi_bresp(s_axi_bresp),
+        .s_axi_bvalid(s_axi_bvalid),
+        .s_axi_bready(s_axi_bready),
+        .s_axi_araddr(s_axi_araddr),
+        .s_axi_arvalid(s_axi_arvalid),
+        .s_axi_arready(s_axi_arready),
+        .s_axi_rdata(s_axi_rdata),
+        .s_axi_rresp(s_axi_rresp),
+        .s_axi_rvalid(s_axi_rvalid),
+        .s_axi_rready(s_axi_rready),
+        .m_axi_araddr(m_axi_araddr),
+        .m_axi_arlen(m_axi_arlen),
+        .m_axi_arsize(m_axi_arsize),
+        .m_axi_arburst(m_axi_arburst),
+        .m_axi_arvalid(m_axi_arvalid),
+        .m_axi_arready(m_axi_arready),
+        .m_axi_rdata(m_axi_rdata),
+        .m_axi_rlast(m_axi_rlast),
+        .m_axi_rvalid(m_axi_rvalid),
+        .m_axi_rready(m_axi_rready),
+        .irq_done(irq_done)
     );
 
-    // --- Clock Generation ---
-    always #5 clk = ~clk; // 100MHz Clock
+    // Clock Generation (100 MHz)
+    always #5 clk = ~clk;
 
-    // --- Memory Read Logic (Simulating RAM Latency) ---
-    // When the chip asks for an address, we give the data
-    // Note: The chip expects packed 32-bit data (4 bytes) usually, 
-    // but for simplicity in this demo, let's assume the memory interface 
-    // reads 32-bits (4 weights) at a time.
+    // =========================================================================
+    // Simulated Main Memory (RAM) Responding to DMA Burst Requests
+    // =========================================================================
+    integer ram_ptr;
+    integer burst_count;
     
-    wire [31:0] mem_read_data_wire;
-    assign mem_read_data_wire = {
-        fake_ram[mem_read_addr+3],
-        fake_ram[mem_read_addr+2],
-        fake_ram[mem_read_addr+1],
-        fake_ram[mem_read_addr]
-    };
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            m_axi_arready <= 0;
+            m_axi_rvalid  <= 0;
+            m_axi_rlast   <= 0;
+            m_axi_rdata   <= 0;
+            burst_count   <= 0;
+        end else begin
+            // 1. Accept Address from DMA
+            if (m_axi_arvalid && !m_axi_arready) begin
+                m_axi_arready <= 1;
+                ram_ptr       <= m_axi_araddr;
+                burst_count   <= m_axi_arlen + 1; // arlen is N-1
+            end else if (m_axi_arready) begin
+                m_axi_arready <= 0;
+            end
+            
+            // 2. Stream Data back to DMA
+            if (burst_count > 0 && (!m_axi_rvalid || m_axi_rready)) begin
+                m_axi_rvalid <= 1;
+                // Fetch 4 bytes (32 bits) at a time
+                m_axi_rdata  <= {MAIN_RAM[ram_ptr+3], MAIN_RAM[ram_ptr+2], MAIN_RAM[ram_ptr+1], MAIN_RAM[ram_ptr]};
+                
+                if (burst_count == 1) m_axi_rlast <= 1;
+                else m_axi_rlast <= 0;
 
-    // --- Test Procedure ---
-    integer i;
-    initial begin
-        $dumpfile("accel_wave.vcd");
-        $dumpfile("accel_wave.vcd");
-        $dumpvars(0, tb_ml_accelerator_top);
-
-        // 1. Initialize
-        clk = 0;
-        rst_n = 0;
-        reg_write_en = 0;
-        
-        // -------------------------------------------------------
-        // Step A: Load "Fake RAM" with Model Data
-        // -------------------------------------------------------
-        $display("[TB] Loading Memory with Digit '7' Image and Weights...");
-        
-        // 1. Load Input Image (Address 0 to 63)
-        // Let's pretend a '7' has pixels lit up at specific spots.
-        // We will fill the whole 64 bytes with random noise, 
-        // BUT set specific indices (representing the shape of 7) to High Value (10).
-        for (i=0; i<64; i=i+1) fake_ram[i] = 8'd1; // Background noise
-        
-        // Draw a "7" in the memory (simulated)
-        fake_ram[4] = 10; fake_ram[5] = 10; fake_ram[6] = 10; // Top bar
-        fake_ram[13] = 10; fake_ram[20] = 10; fake_ram[27] = 10; // Diagonal
-
-        // 2. Load Weights (Address 1000+)
-        // We have 10 classes (cols). We iterate 64 rows for each.
-        // Total weights = 640.
-        // TRICK: We will make the weights for Class 7 match the input image perfectly.
-        // Class 7 is the 8th column.
-        
-        for (i=0; i<640; i=i+1) begin
-            // If this weight belongs to Class 7 (Cols 7, 17, 27... in row-major? No, usually Col-major block)
-            // Let's keep it simple: The hardware likely loads weights linearly.
-            // We'll set ALL weights to 1, but Class 7 weights to 5.
-            // This ensures Class 7 output will be largest.
-            fake_ram[1000+i] = 8'd1; 
+                if (m_axi_rvalid && m_axi_rready) begin
+                    burst_count <= burst_count - 1;
+                    ram_ptr     <= ram_ptr + 4;
+                    if (burst_count == 1) begin
+                        m_axi_rvalid <= 0;
+                        m_axi_rlast  <= 0;
+                    end
+                end
+            end
         end
-        
-        // *Refinement for valid test:* // Since we can't easily map the exact tiling in a generic TB loop without confusing you,
-        // we will rely on the fact that if the chip runs through the data, 
-        // it SHOULD produce result events.
-        
-        // -------------------------------------------------------
-        // Step B: Reset System
-        // -------------------------------------------------------
-        #20 rst_n = 1;
-        #20;
-
-        // -------------------------------------------------------
-        // Step C: Configure Registers (CPU Action)
-        // -------------------------------------------------------
-        $display("[TB] Configuring Accelerator Registers...");
-        
-        // Set M=1 (1 Row Input - simplified for tiling demo, or use 16 to fill array)
-        // Let's try to run a 16x16 calculation to keep it aligned with hardware
-        write_register(4'h2, 32'd16); // M = 16 Rows
-        write_register(4'h3, 32'd16); // K = 16 Shared
-        write_register(4'h4, 32'd16); // N = 16 Cols
-
-        // -------------------------------------------------------
-        // Step D: Start Accelerator
-        // -------------------------------------------------------
-        $display("[TB] Starting Accelerator...");
-        write_register(4'h0, 32'd1); // Start Bit = 1
-
-        // -------------------------------------------------------
-        // Step E: Wait for Interrupt (Done Signal)
-        // -------------------------------------------------------
-        wait(irq_done == 1);
-        $display("[TB] INTERRUPT RECEIVED! Job Done.");
-
-        // -------------------------------------------------------
-        // Step F: Verify (Check internal states or memory writeback)
-        // -------------------------------------------------------
-        // Since the current top-level demo might not have full write-back logic implemented
-        // (it usually requires a separate write state), we confirm success by the IRQ firing.
-        
-        $display("[TB] Test Completed Successfully.");
-        $finish;
     end
 
-    // Helper Task to Write Registers
-    task write_register;
-        input [3:0] addr;
-        input [31:0] data;
-        begin
-            @(posedge clk);
-            reg_addr = addr;
-            reg_wdata = data;
-            reg_write_en = 1;
-            @(posedge clk);
-            reg_write_en = 0;
-        end
-    endtask
+    // =========================================================================
+    // Test Sequence
+    // =========================================================================
+    initial begin
+        // Output waves for GTKWave
+        $dumpfile("waveform.vcd"); 
+        $dumpvars(0, tb_ml_accelerator_top);
 
+        // Initialize Signals
+        clk = 0; rst_n = 0;
+        s_axi_awaddr = 0; s_axi_awvalid = 0;
+        s_axi_wdata = 0;  s_axi_wstrb = 4'hF; s_axi_wvalid = 0;
+        s_axi_bready = 1;
+        s_axi_araddr = 0; s_axi_arvalid = 0;
+        s_axi_rready = 1;
+
+        // Load external data into simulated RAM
+        $readmemh("ram_data.hex", MAIN_RAM);
+
+        #20 rst_n = 1;
+
+        // ---------------------------------------------------------------------
+        // RUN 1: Full Initialization (Fetch Weights + Fetch Inputs)
+        // ---------------------------------------------------------------------
+        $display("RUN 1: Full Load and Compute...");
+        
+        // Write REG_WGT_BASE (Address 0x14) -> Fetch weights from Address 0
+        #10 s_axi_awaddr = 6'h14; s_axi_wdata = 32'd0; s_axi_awvalid = 1; s_axi_wvalid = 1;
+        #10 s_axi_awvalid = 0; s_axi_wvalid = 0;
+
+        // Write REG_INP_BASE (Address 0x18) -> Fetch inputs from Address 256
+        #10 s_axi_awaddr = 6'h18; s_axi_wdata = 32'd256; s_axi_awvalid = 1; s_axi_wvalid = 1;
+        #10 s_axi_awvalid = 0; s_axi_wvalid = 0;
+
+        // Write REG_CONTROL (Address 0x00) -> Start = 1, Reuse Weights = 0 (Data: 32'h01)
+        #10 s_axi_awaddr = 6'h00; s_axi_wdata = 32'h01; s_axi_awvalid = 1; s_axi_wvalid = 1;
+        #10 s_axi_awvalid = 0; s_axi_wvalid = 0;
+
+        // Wait for Run 1 to finish
+        wait(irq_done == 1);
+        $display("RUN 1 Complete.");
+        #100; // Small delay between runs
+
+        // ---------------------------------------------------------------------
+        // RUN 2: Batch Processing (Reuse Weights + Fetch NEW Inputs)
+        // ---------------------------------------------------------------------
+        $display("RUN 2: Reusing Weights for new Data block...");
+
+        // Write REG_INP_BASE (Address 0x18) -> Fetch NEW inputs from Address 512
+        #10 s_axi_awaddr = 6'h18; s_axi_wdata = 32'd512; s_axi_awvalid = 1; s_axi_wvalid = 1;
+        #10 s_axi_awvalid = 0; s_axi_wvalid = 0;
+
+        // Write REG_CONTROL (Address 0x00) -> Start = 1, Reuse Weights = 1 (Data: 32'h03)
+        #10 s_axi_awaddr = 6'h00; s_axi_wdata = 32'h03; s_axi_awvalid = 1; s_axi_wvalid = 1;
+        #10 s_axi_awvalid = 0; s_axi_wvalid = 0;
+
+        // Wait for Run 2 to finish
+        wait(irq_done == 1);
+        $display("RUN 2 Complete.");
+
+        #200;
+        $display("All Simulations Complete.");
+        $finish;
+    end
 endmodule

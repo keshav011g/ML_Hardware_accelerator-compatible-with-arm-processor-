@@ -1,11 +1,11 @@
+`timescale 1ns / 1ps
+
 /*
  * Module: ml_accelerator_top
  * Description:
- * - Top Level IP Core.
- * - Instantiates AXI_Lite_Interface (CPU Control).
- * - Instantiates DMA_Controller (Data Fetching).
- * - Instantiates Systolic_Array (Compute Engine).
- * - Coordinates data flow via FSM.
+ * - Top Level IP Core for ML Accelerator.
+ * - Integrates AXI-Lite (CPU Control) and AXI-Master (DMA).
+ * - FSM supports Weight-Stationary Dataflow and Batch Processing.
  */
 
 module ml_accelerator_top #
@@ -79,7 +79,8 @@ module ml_accelerator_top #
     wire        dma_stream_valid;
 
     // Core Control Signals
-    wire sys_start = reg_ctrl[0];
+    wire sys_start     = reg_ctrl[0];
+    wire reuse_weights = reg_ctrl[1]; // Bit 1 for batch processing
     reg  sys_busy;
     reg  sys_done;
 
@@ -94,13 +95,11 @@ module ml_accelerator_top #
     ) u_cpu_if (
         .clk(clk),
         .rst_n(rst_n),
-        // AXI Ports
         .awaddr(s_axi_awaddr), .awvalid(s_axi_awvalid), .awready(s_axi_awready),
         .wdata(s_axi_wdata),   .wvalid(s_axi_wvalid),   .wready(s_axi_wready),
         .bresp(s_axi_bresp),   .bvalid(s_axi_bvalid),   .bready(s_axi_bready),
         .araddr(s_axi_araddr), .arvalid(s_axi_arvalid), .arready(s_axi_arready),
         .rdata(s_axi_rdata),   .rresp(s_axi_rresp),     .rvalid(s_axi_rvalid), .rready(s_axi_rready),
-        // Internal Interface
         .reg_ctrl(reg_ctrl),
         .reg_m_size(reg_m_size),
         .reg_k_size(reg_k_size),
@@ -117,15 +116,12 @@ module ml_accelerator_top #
     ) u_dma (
         .clk(clk),
         .rst_n(rst_n),
-        // Control
         .start(dma_start),
         .base_addr(dma_addr),
         .transfer_length(dma_len),
         .done(dma_done),
-        // Stream Out
         .stream_data(dma_stream_data),
         .stream_valid(dma_stream_valid),
-        // AXI Master Ports
         .m_axi_araddr(m_axi_araddr), .m_axi_arlen(m_axi_arlen),
         .m_axi_arsize(m_axi_arsize), .m_axi_arburst(m_axi_arburst),
         .m_axi_arvalid(m_axi_arvalid), .m_axi_arready(m_axi_arready),
@@ -134,113 +130,124 @@ module ml_accelerator_top #
     );
 
     // =========================================================================
-    // 3. ON-CHIP BUFFERS (Simplified)
+    // 3. ON-CHIP SRAM BUFFERS
     // =========================================================================
-    // We need to capture the data streaming from DMA before feeding the array
     
-    reg [7:0] weight_buffer [0:255]; // Small buffer for 16x16 weights
-    reg [7:0] input_buffer  [0:255]; // Small buffer for inputs
-    reg [7:0] wgt_idx;
-    reg [7:0] inp_idx;
+    reg [7:0] weight_buffer [0:255]; 
+    reg [7:0] input_buffer  [0:511]; // Expanded for multiple batches
+    reg [8:0] wgt_idx; 
+    reg [8:0] inp_idx;
 
-    // Logic to fill buffers from DMA Stream
     always @(posedge clk) begin
         if (dma_stream_valid) begin
-            // Depending on current state, fill WGT or INP buffer
             if (state == S_FETCH_WEIGHTS) 
-                weight_buffer[wgt_idx] <= dma_stream_data[7:0]; // Taking lower 8 bits for demo
+                weight_buffer[wgt_idx] <= dma_stream_data[7:0]; 
             else if (state == S_FETCH_INPUTS)
                 input_buffer[inp_idx] <= dma_stream_data[7:0];
         end
     end
 
     // =========================================================================
-    // 4. MAIN CONTROL FSM (The Orchestrator)
+    // 4. MAIN CONTROL FSM
     // =========================================================================
     
-    localparam S_IDLE          = 0;
-    localparam S_FETCH_WEIGHTS = 1;
-    localparam S_FETCH_INPUTS  = 2;
-    localparam S_LOAD_ARRAY    = 3;
-    localparam S_COMPUTE       = 4;
-    localparam S_DONE          = 5;
+    localparam S_IDLE          = 3'd0;
+    localparam S_FETCH_WEIGHTS = 3'd1;
+    localparam S_LOAD_WEIGHTS  = 3'd2;
+    localparam S_FETCH_INPUTS  = 3'd3;
+    localparam S_COMPUTE       = 3'd4;
+    localparam S_WRITE_BACK    = 3'd5;
+    localparam S_DONE          = 3'd6;
 
     reg [2:0] state;
     reg array_load_weight;
     reg array_en;
     reg [4:0] load_counter;
-    
-    // Array Wires
-    wire [127:0] flat_ifmap;
-    wire [127:0] flat_weight;
+    reg [5:0] compute_counter;
 
-    // FSM
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state <= S_IDLE;
-            sys_busy <= 0;
-            irq_done <= 0;
-            dma_start <= 0;
+            sys_busy <= 0; sys_done <= 0; irq_done <= 0;
+            dma_start <= 0; array_load_weight <= 0; array_en <= 0;
             wgt_idx <= 0; inp_idx <= 0;
+            load_counter <= 0; compute_counter <= 0;
         end else begin
-            // Update Status Register
             reg_status <= {30'd0, sys_done, sys_busy};
 
             case (state)
                 S_IDLE: begin
-                    sys_done <= 0;
-                    irq_done <= 0;
+                    sys_done <= 0; irq_done <= 0;
                     if (sys_start) begin
-                        state <= S_FETCH_WEIGHTS;
                         sys_busy <= 1;
-                        // Setup DMA for Weights
-                        dma_addr <= reg_wgt_base;
-                        dma_len <= 256; // Fetch 256 weights
-                        dma_start <= 1;
-                        wgt_idx <= 0;
+                        
+                        if (reuse_weights) begin
+                            // BATCH PROCESSING: Skip weight loading, jump to inputs
+                            state <= S_FETCH_INPUTS;
+                            dma_addr <= reg_inp_base;
+                            dma_len <= 256;
+                            dma_start <= 1;
+                            inp_idx <= 0;
+                        end else begin
+                            // STANDARD RUN: Fetch weights first
+                            state <= S_FETCH_WEIGHTS; 
+                            dma_addr <= reg_wgt_base;
+                            dma_len <= 256; 
+                            dma_start <= 1;
+                            wgt_idx <= 0;
+                        end
                     end
                 end
 
                 S_FETCH_WEIGHTS: begin
                     dma_start <= 0;
                     if (dma_stream_valid) wgt_idx <= wgt_idx + 1;
-                    
                     if (dma_done) begin
+                        state <= S_LOAD_WEIGHTS;
+                        load_counter <= 0;
+                    end
+                end
+
+                S_LOAD_WEIGHTS: begin
+                    array_load_weight <= 1;
+                    array_en <= 1;
+                    if (load_counter == 15) begin
                         state <= S_FETCH_INPUTS;
-                        // Setup DMA for Inputs
+                        array_en <= 0;
+                        array_load_weight <= 0;
                         dma_addr <= reg_inp_base;
                         dma_len <= 256;
                         dma_start <= 1;
                         inp_idx <= 0;
+                    end else begin
+                        load_counter <= load_counter + 1;
                     end
                 end
 
                 S_FETCH_INPUTS: begin
                     dma_start <= 0;
                     if (dma_stream_valid) inp_idx <= inp_idx + 1;
-
                     if (dma_done) begin
-                        state <= S_LOAD_ARRAY;
-                        load_counter <= 0;
-                    end
-                end
-
-                S_LOAD_ARRAY: begin
-                    // Push Weights into Array (Daisy Chain)
-                    array_load_weight <= 1;
-                    array_en <= 1;
-                    if (load_counter == 15) begin
                         state <= S_COMPUTE;
-                        load_counter <= 0;
-                    end else begin
-                        load_counter <= load_counter + 1;
+                        compute_counter <= 0;
                     end
                 end
 
                 S_COMPUTE: begin
                     array_load_weight <= 0;
-                    // In a real system, we'd wait for compute cycles
-                    state <= S_DONE; 
+                    array_en <= 1;
+                    // Run compute cycles (16 to fill array + 16 to flush partial sums out)
+                    if (compute_counter == 31) begin 
+                        state <= S_WRITE_BACK;
+                        array_en <= 0;
+                    end else begin
+                        compute_counter <= compute_counter + 1;
+                    end
+                end
+
+                S_WRITE_BACK: begin
+                    // Placeholder for Master Write logic back to RAM
+                    state <= S_DONE;
                 end
 
                 S_DONE: begin
@@ -254,28 +261,38 @@ module ml_accelerator_top #
     end
 
     // =========================================================================
-    // 5. CORE INSTANTIATION
+    // 5. CORE INSTANTIATION & DATA PACKING
     // =========================================================================
     
-    // Helper to flatten 16 rows from buffer for Array Inputs
-    // (Simplified packing for demo)
-    assign flat_ifmap = {input_buffer[15], input_buffer[14], input_buffer[13], input_buffer[12],
-                         input_buffer[11], input_buffer[10], input_buffer[9],  input_buffer[8],
-                         input_buffer[7],  input_buffer[6],  input_buffer[5],  input_buffer[4],
-                         input_buffer[3],  input_buffer[2],  input_buffer[1],  input_buffer[0], 
-                         {8'd0}}; // Pad if necessary (simplified)
+    wire [127:0] flat_ifmap;
+    wire [127:0] flat_weight;
 
-    assign flat_weight = {weight_buffer[load_counter*16 + 15], weight_buffer[load_counter*16 + 0], {112'd0}}; // Just demo mapping
+    // Pack 16 bytes of input data into the 128-bit flat_ifmap bus
+    genvar i;
+    generate
+        for (i = 0; i < 16; i = i + 1) begin : gen_ifmap_pack
+            assign flat_ifmap[(i*8)+7 : i*8] = input_buffer[compute_counter*16 + i];
+        end
+    endgenerate
 
+    // Pack 16 bytes of weight data into the 128-bit flat_weight bus
+    genvar w;
+    generate
+        for (w = 0; w < 16; w = w + 1) begin : gen_weight_pack
+            assign flat_weight[(w*8)+7 : w*8] = weight_buffer[load_counter*16 + w];
+        end
+    endgenerate
+
+    // Instantiate the Systolic Array Core (Must match module name in systolic_array_core16x16.v)
     systolic_array_16x16 u_core (
         .clk(clk),
-        .rst_n(rst_n),
+        .rst_n(rst_n), 
         .en(array_en),
         .load_weight(array_load_weight),
-        .flat_ifmap_in({128{1'b1}}), // Connected to buffer logic in real implement
-        .flat_weight_in({128{1'b1}}),
-        .flat_psum_in({384{1'b0}}),
-        .flat_psum_out()
+        .flat_ifmap_in(flat_ifmap), 
+        .flat_weight_in(flat_weight),
+        .flat_psum_in({384{1'b0}}), // Initial partial sums are zero
+        .flat_psum_out() // Routed to AXI write-back logic in a full system
     );
 
 endmodule

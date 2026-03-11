@@ -1,72 +1,100 @@
 /*
- * Module: systolic_array_16x16
+ * Module: systolic_array_4x4
  * Description: 
- * - A 16x16 grid of PEs (256 Total).
- * - Uses flattened vectors for clean I/O.
+ * A 4x4 grid of processing elements.
+ * * - Weights are loaded serially (or parallel depending on complexity).
+ * Here, we assume we load column-by-column or simply use a dedicated 
+ * loading network. For simplicity in this example, we expose all weight
+ * inputs, and the controller handles the broadcasting.
+ * * - Inputs (IFMAPS) enter from the LEFT side (col 0).
+ * - Partial Sums (PSUMS) enter from the TOP side (row 0), usually 0.
+ * - Results exit from the BOTTOM side (row 3).
  */
-module systolic_array_16x16 (
-    input  wire         clk,
-    input  wire         rst_n,
-    input  wire         en,
-    input  wire         load_weight,
 
-    // Flattened Inputs (16 rows * 8 bits = 128 bits)
-    // Row 0 is [7:0], Row 1 is [15:8], etc.
-    input  wire [127:0] flat_ifmap_in, 
+module systolic_array_4x4 (
+    input  wire        clk,
+    input  wire        rst_n,
+    input  wire        en,
+    input  wire        load_weight,
 
-    // Flattened Weights (16 cols * 8 bits = 128 bits)
-    // Only enters at the top (Daisy Chain)
-    input  wire [127:0] flat_weight_in,
+    // Array Inputs (Left edge of the array)
+    // 4 rows of 8-bit inputs
+    input  wire signed [7:0]  ifmap_in_0,
+    input  wire signed [7:0]  ifmap_in_1,
+    input  wire signed [7:0]  ifmap_in_2,
+    input  wire signed [7:0]  ifmap_in_3,
 
-    // Flattened Partial Sums (16 cols * 24 bits = 384 bits)
-    // Usually 0 from top
-    input  wire [383:0] flat_psum_in,
+    // Weight Inputs (For loading phase)
+    // In a real optimized ASIC, you might daisy-chain these to save wiring area.
+    // For clarity here, we provide a bus for each PE.
+    input  wire signed [7:0]  weight_in [0:3][0:3], 
 
-    // Flattened Results (16 cols * 24 bits = 384 bits)
-    output wire [383:0] flat_psum_out
+    // Array Outputs (Bottom edge of the array)
+    // 4 cols of 24-bit results
+    output wire signed [23:0] psum_out_0,
+    output wire signed [23:0] psum_out_1,
+    output wire signed [23:0] psum_out_2,
+    output wire signed [23:0] psum_out_3
 );
 
-    // Array Size Parameter
-    localparam N = 16;
+    // ----------------------------------------------------------------------
+    // Internal Wires for Inter-PE Connections
+    // ----------------------------------------------------------------------
+    // ifmap_wires[row][col+1] carries data from PE[row][col] to PE[row][col+1]
+    wire signed [7:0]  ifmap_wires [0:3][0:4]; 
+    
+    // psum_wires[row+1][col] carries data from PE[row][col] to PE[row+1][col]
+    wire signed [23:0] psum_wires  [0:4][0:3];
 
-    // Internal Wires (Unpacked for ease of use in generate loops)
-    wire signed [7:0]  w_ifmap [0:N-1][0:N]; // Horizontal
-    wire signed [23:0] w_psum  [0:N][0:N-1]; // Vertical Sums
-    wire signed [7:0]  w_wght  [0:N][0:N-1]; // Vertical Weights
 
-    // Unpack Inputs to Row 0 / Col 0
-    genvar i;
-    generate
-        for (i=0; i<N; i=i+1) begin : UNPACK
-            assign w_ifmap[i][0] = flat_ifmap_in[i*8 +: 8];
-            assign w_wght[0][i]  = flat_weight_in[i*8 +: 8];
-            assign w_psum[0][i]  = flat_psum_in[i*24 +: 24];
-            
-            // Pack Outputs from Row N / Col N
-            assign flat_psum_out[i*24 +: 24] = w_psum[N][i];
-        end
-    endgenerate
+    // ----------------------------------------------------------------------
+    // Wire Assignments for Boundary Conditions
+    // ----------------------------------------------------------------------
+    
+    // Connect Module Inputs to the Left-most wires (Column 0)
+    assign ifmap_wires[0][0] = ifmap_in_0;
+    assign ifmap_wires[1][0] = ifmap_in_1;
+    assign ifmap_wires[2][0] = ifmap_in_2;
+    assign ifmap_wires[3][0] = ifmap_in_3;
 
-    // Generate the 16x16 Grid
+    // Connect Zeros to the Top-most wires (Row 0) 
+    // (Unless you are cascading arrays, the top sum starts at 0)
+    assign psum_wires[0][0] = 24'd0;
+    assign psum_wires[0][1] = 24'd0;
+    assign psum_wires[0][2] = 24'd0;
+    assign psum_wires[0][3] = 24'd0;
+
+    // Connect Bottom-most wires (Row 4) to Module Outputs
+    assign psum_out_0 = psum_wires[4][0];
+    assign psum_out_1 = psum_wires[4][1];
+    assign psum_out_2 = psum_wires[4][2];
+    assign psum_out_3 = psum_wires[4][3];
+
+
+    // ----------------------------------------------------------------------
+    // Generate the 4x4 Grid
+    // ----------------------------------------------------------------------
     genvar r, c;
     generate
-        for (r=0; r<N; r=r+1) begin : ROWS
-            for (c=0; c<N; c=c+1) begin : COLS
+        for (r = 0; r < 4; r = r + 1) begin : ROW
+            for (c = 0; c < 4; c = c + 1) begin : COL
+                
                 processing_element pe (
                     .clk         (clk),
                     .rst_n       (rst_n),
                     .en          (en),
                     .load_weight (load_weight),
                     
-                    // Connection Logic
-                    .ifmap_in    (w_ifmap[r][c]),
-                    .psum_in     (w_psum[r][c]),
-                    .weight_in   (w_wght[r][c]),
+                    // Inputs
+                    .weight_in   (weight_in[r][c]),
+                    .ifmap_in    (ifmap_wires[r][c]),   // From Left
+                    .psum_in     (psum_wires[r][c]),    // From Top
                     
-                    .ifmap_out   (w_ifmap[r][c+1]),
-                    .psum_out    (w_psum[r+1][c]),
-                    .weight_out  (w_wght[r+1][c])
+                    // Outputs
+                    .ifmap_out   (ifmap_wires[r][c+1]), // To Right
+                    .psum_out    (psum_wires[r+1][c])   // To Bottom
                 );
+                
             end
         end
     endgenerate
